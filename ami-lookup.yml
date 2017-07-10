@@ -1,0 +1,150 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation Custom Resource to lookup AMIs using filters
+Resources:
+  AMILookupFunction:
+    DependsOn:
+      - AMILookupPolicy
+      - PolicyWriteToCloudWatch
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: Function to be used as a custom resource by CloudFormation to lookup AMI Identifiers
+      Handler: index.handler
+      MemorySize: 128
+      Runtime: python3.6
+      Timeout: 20
+      Role: !GetAtt AMILookupRole.Arn
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+
+          import boto3
+          import cfnresponse
+          from datetime import datetime
+
+          def gen_filter_list(input_filters):
+              output = []
+              if not isinstance(input_filters, dict):
+                  cfnresponse.send(event, context, cfnresponse.FAILED)
+                  raise TypeError('"Filters" value must be a dictionary of key/value pairs')
+              for ami_filter in input_filters:
+                  if not isinstance(input_filters[ami_filter], str):
+                      cfnresponse.send(event, context, cfnresponse.FAILED)
+                      raise TypeError('Values in "Filters" must be strings')
+                  output.append(
+                      {
+                          'Name': ami_filter,
+                          'Values': [input_filters[ami_filter]]
+                      }
+                  )
+              return output
+
+          def select_latest_image(images):
+              output = None
+              datetime_format = '%Y-%m-%dT%H:%M:%S.000Z'
+              latest_image = {
+                  'ami-id': 'ami-ffffffff',
+                  'datetime': datetime.fromtimestamp(0)
+              }
+              for image in images:
+                  image_creation_date = datetime.strptime(image['CreationDate'], datetime_format)
+                  if image_creation_date > latest_image['datetime']:
+                      latest_image = {
+                          'ami-id': image['ImageId'],
+                          'datetime': image_creation_date
+                      }
+              return latest_image['ami-id']
+
+          def handler(event, context=None):
+              result = {}
+
+              if event['RequestType'] == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, result)
+              else:
+                  owners = event['ResourceProperties']['Owners'] if 'Owners' in event['ResourceProperties'] else []
+                  executable_users = event['ResourceProperties']['ExecutableUsers'] if 'ExecutableUsers' in event['ResourceProperties'] else []
+                  region = event['ResourceProperties']['Region'] if 'Region' in event['ResourceProperties'] else None
+                  filters = gen_filter_list(event['ResourceProperties']['Filters']) if 'Filters' in event['ResourceProperties'] else []
+
+                  session = boto3.session.Session(region_name=region)
+                  ec2_client = session.client('ec2')
+
+                  images = ec2_client.describe_images(
+                      Filters=filters, Owners=owners, ExecutableUsers=executable_users
+                      )['Images']
+                  if len(images) == 0:
+                      cfnresponse.send(event, context, cfnresponse.FAILED, "No images matching the criteria were found!")
+                      raise RuntimeError('No images matching the criteria were found!')
+
+                  result['AMIId'] = select_latest_image(images)
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, result, result['AMIId'])
+
+  AMILookupRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+
+  AMILookupPolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      Roles:
+        - !Ref AMILookupRole
+      PolicyName: AMILookup
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - ec2:DescribeImages
+            Resource:
+              - "*"
+
+  PolicyWriteToCloudWatch:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: WriteToCloudWatch
+      Roles:
+        - !Ref AMILookupRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action:
+              - "logs:CreateLogGroup"
+            Effect: "Allow"
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+          - Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Effect: "Allow"
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*
+
+  TestCustomResource:
+    Type: "Custom::AMILookup"
+    Properties:
+      ServiceToken: !GetAtt AMILookupFunction.Arn
+      Filters:
+         name: "amzn-ami-hvm-2017.03.?.????????-x86_64-gp2"
+         owner-alias: "amazon"
+         virtualization-type: "hvm"
+         state: "available"
+
+Outputs:
+  AMILookupFunctionArn:
+    Value: !GetAtt AMILookupFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}::AMILookupFunctionArn"
+
+  TestAMIOutput:
+    Value: !GetAtt TestCustomResource.AMIId
