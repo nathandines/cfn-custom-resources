@@ -19,17 +19,18 @@ Resources:
           from __future__ import print_function
 
           import boto3
+          import botocore.exceptions
           import cfnresponse
           from datetime import datetime
 
           def gen_filter_list(input_filters):
               output = []
               if not isinstance(input_filters, dict):
-                  cfnresponse.send(event, context, cfnresponse.FAILED)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
                   raise TypeError('"Filters" value must be a dictionary of key/value pairs')
               for ami_filter in input_filters:
                   if not isinstance(input_filters[ami_filter], str):
-                      cfnresponse.send(event, context, cfnresponse.FAILED)
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {})
                       raise TypeError('Values in "Filters" must be strings')
                   output.append(
                       {
@@ -69,9 +70,14 @@ Resources:
                   session = boto3.session.Session(region_name=region)
                   ec2_client = session.client('ec2')
 
-                  images = ec2_client.describe_images(
-                      Filters=filters, Owners=owners, ExecutableUsers=executable_users
-                      )['Images']
+                  try:
+                      images = ec2_client.describe_images(
+                          Filters=filters, Owners=owners, ExecutableUsers=executable_users
+                          )['Images']
+                  except botocore.exceptions.ClientError as error:
+                      cfnresponse.send(event, context, cfnresponse.FAILED, result)
+                      raise error
+
                   if len(images) == 0:
                       cfnresponse.send(event, context, cfnresponse.FAILED, "No images matching the criteria were found!")
                       raise RuntimeError('No images matching the criteria were found!')
@@ -131,6 +137,7 @@ Resources:
               - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*
 
   TestCustomResource:
+    DependsOn: AMILookupFunction
     Type: "Custom::AMILookup"
     Properties:
       ServiceToken: !GetAtt AMILookupFunction.Arn
