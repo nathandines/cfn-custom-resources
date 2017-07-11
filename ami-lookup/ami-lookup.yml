@@ -19,9 +19,9 @@ Resources:
           from __future__ import print_function
 
           import boto3
-          import botocore.exceptions
           import cfnresponse
           from datetime import datetime
+          from time import sleep
 
           def gen_filter_list(input_filters):
               output = []
@@ -57,6 +57,9 @@ Resources:
               return latest_image['ami-id']
 
           def handler(event, context=None):
+
+              # Insert sleep timer here to give IAM role time to initialise upon initial deployment
+              sleep(10)
               result = {}
 
               if event['RequestType'] == 'Delete':
@@ -74,12 +77,12 @@ Resources:
                       images = ec2_client.describe_images(
                           Filters=filters, Owners=owners, ExecutableUsers=executable_users
                           )['Images']
-                  except botocore.exceptions.ClientError as error:
-                      cfnresponse.send(event, context, cfnresponse.FAILED, result)
-                      raise error
+                  except:
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {})
+                      raise
 
                   if len(images) == 0:
-                      cfnresponse.send(event, context, cfnresponse.FAILED, "No images matching the criteria were found!")
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {})
                       raise RuntimeError('No images matching the criteria were found!')
 
                   result['AMIId'] = select_latest_image(images)
